@@ -43,6 +43,8 @@ static int wpa_driver_wext_set_auth_alg(void *priv, int auth_alg);
 #ifdef ANDROID
 extern int wpa_driver_wext_driver_cmd(void *priv, char *cmd, char *buf,
                                        size_t buf_len);
+extern int wpa_driver_wext_combo_scan(void *priv,
+					struct wpa_driver_scan_params *params);
 extern int wpa_driver_signal_poll(void *priv, struct wpa_signal_info *si);
 #endif
 
@@ -507,9 +509,11 @@ static void wpa_driver_wext_event_wireless(struct wpa_driver_wext_data *drv,
 					   "IWEVCUSTOM length");
 				return;
 			}
-			buf = dup_binstr(custom, iwe->u.data.length);
+			buf = os_malloc(iwe->u.data.length + 1);
 			if (buf == NULL)
 				return;
+			os_memcpy(buf, custom, iwe->u.data.length);
+			buf[iwe->u.data.length] = '\0';
 			wpa_driver_wext_event_wireless_custom(drv->ctx, buf);
 			os_free(buf);
 			break;
@@ -1029,6 +1033,13 @@ int wpa_driver_wext_scan(void *priv, struct wpa_driver_scan_params *params)
 	const u8 *ssid = params->ssids[0].ssid;
 	size_t ssid_len = params->ssids[0].ssid_len;
 
+#ifdef ANDROID
+	if (drv->capa.max_scan_ssids > 1) {
+		ret = wpa_driver_wext_combo_scan(priv, params);
+		goto scan_out;
+	}
+#endif
+
 	if (ssid_len > IW_ESSID_MAX_SIZE) {
 		wpa_printf(MSG_DEBUG, "%s: too long SSID (%lu)",
 			   __FUNCTION__, (unsigned long) ssid_len);
@@ -1054,6 +1065,9 @@ int wpa_driver_wext_scan(void *priv, struct wpa_driver_scan_params *params)
 		ret = -1;
 	}
 
+#ifdef ANDROID
+scan_out:
+#endif
 	/* Not all drivers generate "scan completed" wireless event, so try to
 	 * read results after a timeout. */
 	timeout = 10;
@@ -1588,7 +1602,11 @@ static int wpa_driver_wext_get_range(void *priv)
 		drv->capa.auth = WPA_DRIVER_AUTH_OPEN |
 			WPA_DRIVER_AUTH_SHARED |
 			WPA_DRIVER_AUTH_LEAP;
+#ifdef ANDROID
+		drv->capa.max_scan_ssids = WEXT_CSCAN_AMOUNT;
+#else
 		drv->capa.max_scan_ssids = 1;
+#endif
 
 		wpa_printf(MSG_DEBUG, "  capabilities: key_mgmt 0x%x enc 0x%x "
 			   "flags 0x%x",
@@ -1701,7 +1719,7 @@ static int wpa_driver_wext_set_key_ext(void *priv, enum wpa_alg alg,
 	case WPA_ALG_PMK:
 		ext->alg = IW_ENCODE_ALG_PMK;
 		break;
-#ifdef CONFIG_IEEE80211W_DISABLE
+#ifdef CONFIG_IEEE80211W
 	case WPA_ALG_IGTK:
 		ext->alg = IW_ENCODE_ALG_AES_CMAC;
 		break;
@@ -1941,6 +1959,18 @@ static int wpa_driver_wext_deauthenticate(void *priv, const u8 *addr,
 }
 
 
+static int wpa_driver_wext_disassociate(void *priv, const u8 *addr,
+					int reason_code)
+{
+	struct wpa_driver_wext_data *drv = priv;
+	int ret;
+	wpa_printf(MSG_DEBUG, "%s", __FUNCTION__);
+	ret = wpa_driver_wext_mlme(drv, addr, IW_MLME_DISASSOC, reason_code);
+	wpa_driver_wext_disconnect(drv);
+	return ret;
+}
+
+
 static int wpa_driver_wext_set_gen_ie(void *priv, const u8 *ie,
 				      size_t ie_len)
 {
@@ -2127,7 +2157,7 @@ int wpa_driver_wext_associate(void *priv,
 					   IW_AUTH_RX_UNENCRYPTED_EAPOL,
 					   allow_unencrypted_eapol) < 0)
 		ret = -1;
-#ifdef CONFIG_IEEE80211W_DISABLE
+#ifdef CONFIG_IEEE80211W
 	switch (params->mgmt_frame_protection) {
 	case NO_MGMT_FRAME_PROTECTION:
 		value = IW_AUTH_MFP_DISABLED;
@@ -2476,6 +2506,7 @@ const struct wpa_driver_ops wpa_driver_wext_ops = {
 	.scan2 = wpa_driver_wext_scan,
 	.get_scan_results2 = wpa_driver_wext_get_scan_results,
 	.deauthenticate = wpa_driver_wext_deauthenticate,
+	.disassociate = wpa_driver_wext_disassociate,
 	.associate = wpa_driver_wext_associate,
 	.init = wpa_driver_wext_init,
 	.deinit = wpa_driver_wext_deinit,
